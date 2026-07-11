@@ -1,0 +1,8 @@
+build/
+managed_components/
+*.o
+*.elf
+*.bin
+corpus/*/large-seeds/
+.vscode/
+__pycache__/

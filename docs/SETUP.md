@@ -58,3 +58,72 @@ into the VS Code UI and handles the environment sourcing for you automatically p
 - Flash a real board once with the same hello_world to confirm your USB/serial drivers
   work before you need them for a real crash reproduction: `idf.py -p <PORT> flash monitor`
 - On Linux, you may need your user in the `dialout` group for serial port access.
+
+
+
+
+## new one after update
+# Local setup — Windows (native, no WSL needed)
+
+ESP-IDF ships pre-built QEMU binaries for Windows directly. You do NOT need to build QEMU
+from source, and you do NOT need WSL for this step. (Original version of this doc assumed
+a Linux-style from-source build — corrected here after checking Espressif's current docs.)
+
+## 1. Install the "Espressif IDF" VS Code extension
+- Open VS Code → Extensions (Ctrl+Shift+X) → search "Espressif IDF" → Install
+  (publisher: Espressif Systems)
+- This is the easiest path on Windows — it wraps the whole setup in a GUI wizard instead
+  of raw terminal commands.
+
+## 2. Run the setup wizard
+- Ctrl+Shift+P → type "ESP-IDF: Configure ESP-IDF Extension" → Enter
+- Choose "Express" install
+- Pick the latest stable ESP-IDF version (v5.5 or newer)
+- Let it download ESP-IDF itself + the Xtensa/RISC-V toolchains + Python env
+  (this step takes a while — real download size, be patient, don't cancel it)
+
+## 3. Install QEMU (pre-built, Windows-native)
+Once the extension setup finishes, open the "ESP-IDF Terminal" from the VS Code command
+palette (Ctrl+Shift+P → "ESP-IDF: Open ESP-IDF Terminal") — this terminal has the right
+environment variables already loaded. Then run:
+```
+python %IDF_PATH%\tools\idf_tools.py install qemu-xtensa qemu-riscv32
+```
+Verify it installed:
+```
+python %IDF_PATH%\tools\idf_tools.py list
+```
+You should see `qemu-xtensa` and `qemu-riscv32` listed as installed.
+
+## 4. Sanity check — build and boot hello_world under QEMU
+Still inside the ESP-IDF Terminal:
+```
+idf.py create-project hello_test
+cd hello_test
+idf.py set-target esp32
+idf.py build
+idf.py qemu monitor
+```
+You should see the ESP-IDF boot log scroll by. To exit: Ctrl+] (or check the terminal
+output for the exact exit key — VS Code's integrated terminal sometimes intercepts Ctrl-A).
+
+If this works, your whole toolchain is confirmed working end to end. Don't touch a real
+library until this step succeeds.
+
+## 5. Real hardware validation setup (for later, once you have a harness + a crash)
+- Plug in your ESP32/ESP8266 board via USB
+- Windows should auto-install the CP210x or CH340 USB-serial driver; if the board doesn't
+  show up as a COM port in Device Manager, install the driver manually (search "CP2102
+  driver" or "CH340 driver" depending on your board)
+- Flash: `idf.py -p COMx flash monitor` (replace COMx with the actual port from Device Manager)
+
+## 6. AFL++ — this DOES need Linux
+AFL++ itself is Linux-only (no native Windows build). Two options once you're actually
+ready to fuzz (not needed yet — this is a later step):
+- **WSL2** for the fuzzing loop specifically, while keeping ESP-IDF/QEMU on native Windows
+  for the build+boot steps. This split is fine — QEMU and AFL++ just need to talk to the
+  same binary artifact.
+- Or run the whole pipeline inside WSL2 once you're comfortable with it, using the
+  Linux-native instructions (git clone + install.sh, same idf_tools.py qemu install command
+  works identically inside WSL2).
+Cross this bridge when you're actually about to fuzz something — not needed for today.

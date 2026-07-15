@@ -10,3 +10,5 @@ __pycache__/
 # Private coordinated-disclosure material
 disclosures/esp-modbus-truncated-exception/
 docs/research-log.md
+# Private raw security-research evidence
+private-raw-evidence/

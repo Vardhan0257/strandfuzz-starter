@@ -6,3 +6,6 @@ managed_components/
 corpus/*/large-seeds/
 .vscode/
 __pycache__/
+
+# Private coordinated-disclosure material
+disclosures/esp-modbus-truncated-exception/

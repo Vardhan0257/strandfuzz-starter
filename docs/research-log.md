@@ -92,8 +92,237 @@ Remote exploitability and security impact have not yet been established.
 
 The exception-response branch reads:
 
+[``c
+//if (func_code & MB_FUNC_ERROR) {
+//    exception = (mb_exception_t)buf[MB_PDU_DATA_OFF];
+//    return exception;
+//}  ]
+
+
+# Day 5:
+Malformed network response
+        ↓
+PDU length = 1
+        ↓
+Exception function code = 0x83
+        ↓
+Missing exception-code byte
+        ↓
+Parser still accesses buf[1]
+        ↓
+Observed buf[1] = 0x00
+        ↓
+0x00 interpreted as MB_EX_NONE
+        ↓
+Malformed response reported as successful
+        ↓
+Application receives 0x0000 with error = 0
+
+
+## End-to-End Mechanism Confirmation: Truncated Exception PDU
+
+**Date:** 2026-07-15  
+**Status:** Confirmed  
+**Environment:** ESP32, ESP-IDF v5.5.4, ESP-Modbus TCP master  
+**Test application:** `test_apps/mb_tcp_e2e_repro`  
+**Controlled peer:** `tools/truncated_exception_server.py`
+
+### Objective
+
+The previous end-to-end test confirmed that a truncated Modbus/TCP exception response was reported as a successful parameter read. However, the returned application value was `0x0000`, while the controlled sink-level test returned the poisoned sentinel value `0xAA`.
+
+This experiment was performed to determine the value of `buf[1]` when the truncated response reached the exception-processing logic and to explain the difference between the sink-level and end-to-end observations.
+
+### Test Input
+
+The controlled Modbus/TCP peer returned the following eight-byte response:
+
+```text
+00 04 00 00 00 02 01 83
+
+
+
+Add a new section at the **bottom** of `docs/research-log.md`. Do not replace your previous sink-level or E2E evidence. Paste this:
+
+````markdown
+## End-to-End Mechanism Confirmation: Truncated Exception PDU
+
+**Date:** 2026-07-15  
+**Status:** Confirmed  
+**Environment:** ESP32, ESP-IDF v5.5.4, ESP-Modbus TCP master  
+**Test application:** `test_apps/mb_tcp_e2e_repro`  
+**Controlled peer:** `tools/truncated_exception_server.py`
+
+### Objective
+
+The previous end-to-end test confirmed that a truncated Modbus/TCP exception response was reported as a successful parameter read. However, the returned application value was `0x0000`, while the controlled sink-level test returned the poisoned sentinel value `0xAA`.
+
+This experiment was performed to determine the value of `buf[1]` when the truncated response reached the exception-processing logic and to explain the difference between the sink-level and end-to-end observations.
+
+### Test Input
+
+The controlled Modbus/TCP peer returned the following eight-byte response:
+
+```text
+00 04 00 00 00 02 01 83
+````
+
+The Modbus Application Protocol header declared:
+
+```text
+Length: 0x0002
+Unit identifier: 0x01
+```
+
+Therefore, the received Modbus PDU contained only one byte:
+
+```text
+83
+```
+
+`0x83` represents function code `0x03` with the Modbus exception bit set. A valid Modbus exception response requires an additional exception-code byte. That required byte was intentionally omitted.
+
+### Instrumentation
+
+Temporary diagnostic instrumentation was added to the exception-processing path in:
+
+```text
+modbus/mb_objects/mb_master.c
+```
+
+The trace recorded:
+
+* Received function code
+* Logical PDU length
+* `buf[0]`
+* `buf[1]`
+
+The diagnostic output was:
+
+```text
+MB_E2E_TRACE: func_code=0x83, pdu_len=1, buf[0]=0x83, buf[1]=0x00
+```
+
+The same result was observed for all three tested parameter reads.
+
+### Observed Application Behavior
+
+Immediately after each trace, the ESP-Modbus master reported the parameter read as successful:
+
+```text
+CHAR #0 MB_hold_reg-0 (Data) value = (0x0000) parameter read successful.
+CHAR #0, value: 0x0, expected: 0x1111, error = 0.
+
+CHAR #1 MB_hold_reg-1 (Data) value = (0x0000) parameter read successful.
+CHAR #1, value: 0x0, expected: 0x2222, error = 0.
+
+CHAR #2 MB_hold_reg-2 (Data) value = (0x0000) parameter read successful.
+CHAR #2, value: 0x0, expected: 0x3333, error = 0.
+```
+
+The Unity test failed because the returned values did not match the expected values, even though the Modbus API reported no error:
+
+```text
+1 Tests 1 Failures 0 Ignored
+FAIL
+```
+
+### Confirmed Mechanism
+
+The trace confirms the following execution sequence:
+
+1. The Modbus/TCP master received a one-byte exception PDU containing only `0x83`.
+
+2. The parser correctly observed a logical PDU length of one:
+
+```text
+pdu_len=1
+```
+
+3. Despite the missing exception-code byte, the exception-processing path accessed:
+
 ```c
-if (func_code & MB_FUNC_ERROR) {
-    exception = (mb_exception_t)buf[MB_PDU_DATA_OFF];
-    return exception;
-}
+buf[1]
+```
+
+4. The byte at that location was observed as:
+
+```text
+buf[1]=0x00
+```
+
+5. The value `0x00` was interpreted as `MB_EX_NONE`.
+
+6. The malformed and truncated exception response was therefore propagated as a successful parameter read rather than rejected as an invalid response.
+
+7. The application received a value of `0x0000` while the returned error status was zero.
+
+### Explanation of the Sink-Level and End-to-End Difference
+
+The sink-level and end-to-end results are consistent with the same missing length validation.
+
+In the controlled sink-level test, the backing buffer was deliberately initialized with the sentinel value `0xAA`. The invalid access to `buf[1]` therefore produced:
+
+```text
+0xAA
+```
+
+In the real end-to-end network path, the logical PDU still contained only one valid byte, but the byte observed at `buf[1]` was:
+
+```text
+0x00
+```
+
+This caused the exception value to evaluate to `MB_EX_NONE`, resulting in the malformed response being reported as successful.
+
+The difference between `0xAA` and `0x00` does not contradict the two experiments. Both demonstrate that the exception-processing path accesses `buf[1]` without first verifying that the logical PDU contains the required exception-code byte.
+
+### Confirmed Finding
+
+ESP-Modbus does not verify that an exception PDU contains the required exception-code byte before accessing `buf[1]`.
+
+A truncated Modbus/TCP exception response containing only an exception function code can therefore cause the parser to consume a byte outside the logical PDU boundary. In the reproduced end-to-end execution, the observed byte was `0x00`, which was interpreted as `MB_EX_NONE`. As a result, the malformed response was silently reported as a successful parameter read with a returned value of `0x0000`.
+
+### Impact
+
+An application using the ESP-Modbus TCP master may be unable to reliably distinguish a malformed or truncated exception response from a successful Modbus operation.
+
+This can cause corrupted or incomplete network responses to be silently accepted and can expose invalid or default parameter values to application logic while the API reports success.
+
+This finding is characterized as a protocol robustness and input-validation defect. The confirmed impact is silent acceptance of a malformed truncated response. Memory disclosure has not been demonstrated.
+
+### Suggested Validation
+
+Before reading the exception-code byte, the implementation should verify that the logical PDU contains at least the function-code byte and the required exception-code byte.
+
+The exception path should reject a truncated PDU before accessing `buf[1]`.
+
+### Separate Unconfirmed Observation
+
+A Guru Meditation double-exception crash occurred after test completion and was reproducible during multiple runs.
+
+The crash has not been established as a consequence of the missing exception-PDU length validation. It is therefore recorded only as a separate, unconfirmed observation and is not included in the confirmed impact of this finding.
+
+````
+
+Then save the file and run:
+
+```powershell
+cd D:\projects\HARDWARE\strandfuzz-starter\strandfuzz
+
+git diff -- docs\research-log.md
+````
+
+Review the diff. If the new section looks correct:
+
+```powershell
+git add docs\research-log.md
+
+git commit -m "Confirm E2E truncated exception stale-byte mechanism"
+
+git tag e2e-mechanism-confirmed-v1
+
+git status
+```
+
+One precision correction: your professor called it a “stale-value mechanism,” but your current evidence proves that `buf[1]` was `0x00` outside the **logical PDU boundary**. It does **not yet prove where that zero originated**—reused buffer contents, initialization, or another transport behavior. The research log above deliberately avoids claiming “stale memory” as proven. That distinction matters in a vendor report.
